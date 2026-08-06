@@ -6,12 +6,23 @@ import { r2 } from "@/lib/r2";
 
 const BUCKET = process.env.R2_BUCKET!;
 
-function normalize(s: string) {
-  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
+function normalize(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]/g, "");
 }
 
-function key(title: string, artist: string) {
-  return `${normalize(artist)}-${normalize(title)}.ttml`;
+function makeKey(title: string, artist: string, appleId?: string | null, persistentId?: string | null) {
+  if (appleId) {
+    return `lyrics/apple-${appleId}.ttml`;
+  }
+
+  if (persistentId) {
+    return `lyrics/persistent-${persistentId}.ttml`;
+  }
+
+  return `lyrics/${normalize(artist)}-${normalize(title)}.ttml`;
 }
 
 async function getR2(Key: string) {
@@ -23,70 +34,101 @@ async function getR2(Key: string) {
       }),
     );
 
-    return await obj.Body?.transformToString();
+    if (!obj.Body) return null;
+
+    return await obj.Body.transformToString();
   } catch {
     return null;
   }
 }
 
 async function putR2(Key: string, body: string) {
-  await r2.send(
-    new PutObjectCommand({
-      Bucket: BUCKET,
+  try {
+    await r2.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
 
-      Key,
+        Key,
 
-      Body: body,
+        Body: body,
 
-      ContentType: "application/ttml+xml",
-    }),
-  );
+        ContentType: "application/ttml+xml",
+
+        CacheControl: "public,max-age=31536000",
+      }),
+    );
+
+    console.log("R2 uploaded", Key);
+  } catch (e) {
+    console.error("R2 upload failed", e);
+  }
 }
 
-async function appleMusic(title: string, artist: string) {
-  const q = encodeURIComponent(`${title} ${artist}`);
+async function fetchAppleTTML(title: string, artist: string) {
+  try {
+    const query = encodeURIComponent(`${title} ${artist}`);
 
-  const search = await fetch(`https://api.paxsenix.org/apple-music/search?q=${q}`, {
-    headers: {
-      Authorization: `Bearer ${process.env.PAXSENIX_API_TOKEN}`,
-    },
-  });
+    const search = await fetch(`https://api.paxsenix.org/apple-music/search?q=${query}`, {
+      headers: {
+        Authorization: `Bearer ${process.env.PAXSENIX_API_TOKEN}`,
+      },
+    });
 
-  if (!search.ok) return null;
+    if (!search.ok) return null;
 
-  const data = await search.json();
+    const searchJson = await search.json();
 
-  const track = data.results?.[0];
+    const track = searchJson.results?.find((item: any) => item.hasTimeSyncedLyrics);
 
-  if (!track) return null;
+    if (!track) return null;
 
-  if (!track.hasTimeSyncedLyrics) return null;
+    const id = track.playParams?.id;
 
-  const id = track.playParams.id;
+    if (!id) return null;
 
-  const lyric = await fetch(`https://api.paxsenix.org/lyrics/applemusic?id=${id}`, {
-    headers: {
-      Authorization: `Bearer ${process.env.PAXSENIX_API_TOKEN}`,
-    },
-  });
+    const lyric = await fetch(`https://lyrics.paxsenix.org/apple-music/lyrics?id=${id}&ttml=true&skip_cache=false&v=1`, {
+      headers: {
+        accept: "application/json",
 
-  if (!lyric.ok) return null;
+        Authorization: `Bearer ${process.env.PAXSENIX_API_TOKEN}`,
+      },
+    });
 
-  const json = await lyric.json();
+    if (!lyric.ok) return null;
 
-  return json.ttmlContent ?? null;
+    const json = await lyric.json();
+
+    if (json.type !== "TTML" || !json.content) return null;
+
+    const ttml = json.content;
+
+    if (!ttml.includes("<tt")) return null;
+
+    return {
+      ttml,
+      appleId: id,
+    };
+  } catch (e) {
+    console.error("Apple error", e);
+
+    return null;
+  }
 }
 
-async function lrclib(title: string, artist: string) {
-  const url = `https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(title)}`;
+async function fetchLRCLIB(title: string, artist: string) {
+  try {
+    const url = `https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(title)}`;
 
-  const res = await fetch(url);
+    const res = await fetch(url);
 
-  if (!res.ok) return null;
+    if (!res.ok) return null;
 
-  const data = await res.json();
+    const json = await res.json();
 
-  return data.syncedLyrics ?? null;
+    return json.syncedLyrics ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function GET(req: Request) {
@@ -96,10 +138,22 @@ export async function GET(req: Request) {
 
   const artist = searchParams.get("artist");
 
+  const album = searchParams.get("album");
+
+  const appleId = searchParams.get("appleId");
+
+  const persistentId = searchParams.get("persistentId");
+
+  const duration = searchParams.get("duration");
+
+  /*
+    title + artist 필수
+  */
+
   if (!title || !artist) {
     return NextResponse.json(
       {
-        error: "missing params",
+        error: "title and artist required",
       },
       {
         status: 400,
@@ -107,9 +161,11 @@ export async function GET(req: Request) {
     );
   }
 
-  const Key = key(title, artist);
+  const Key = makeKey(title, artist, appleId, persistentId);
 
-  // 1. R2 cache
+  /*
+    1. R2
+  */
 
   const cached = await getR2(Key);
 
@@ -117,31 +173,40 @@ export async function GET(req: Request) {
     return new NextResponse(cached, {
       headers: {
         "Content-Type": "application/ttml+xml",
+
+        "Cache-Control": "public,max-age=31536000",
       },
     });
   }
 
-  // 2. Apple Music
+  /*
+    2. Apple Music
+  */
 
-  const ttml = await appleMusic(title, artist);
+  const apple = await fetchAppleTTML(title, artist);
 
-  if (ttml) {
-    await putR2(Key, ttml);
+  if (apple) {
+    const finalKey = makeKey(title, artist, apple.appleId, persistentId);
 
-    return new NextResponse(ttml, {
+    await putR2(finalKey, apple.ttml);
+
+    return new NextResponse(apple.ttml, {
       headers: {
         "Content-Type": "application/ttml+xml",
       },
     });
   }
 
-  // 3. LRCLIB
+  /*
+    3. LRCLIB
+  */
 
-  const lrc = await lrclib(title, artist);
+  const lrc = await fetchLRCLIB(title, artist);
 
   if (lrc) {
     return NextResponse.json({
       type: "lrc",
+
       lyric: lrc,
     });
   }
