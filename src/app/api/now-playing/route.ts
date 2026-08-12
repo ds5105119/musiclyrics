@@ -3,9 +3,48 @@ import { redis } from "@/lib/redis";
 
 const KEY = "now-playing";
 
+function emptyNowPlaying() {
+  return {
+    title: null,
+    artist: null,
+    album: null,
+
+    albumArtist: null,
+    composer: null,
+    genre: null,
+
+    trackNumber: null,
+    discNumber: null,
+
+    persistentId: null,
+    appleId: null,
+
+    artwork: null,
+
+    position: 0,
+    duration: 0,
+
+    playing: false,
+
+    // 마지막으로 Mac에서 데이터가 업데이트된 시각
+    updatedAt: null,
+
+    // GET 응답을 생성한 서버의 현재 시각
+    serverTime: Date.now(),
+  };
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
+
+    /*
+     * updatedAt:
+     * Mac에서 새로운 Now Playing 상태가 서버에 전달된 시각.
+     *
+     * position이 이 시점의 playback position이라고 볼 수 있다.
+     */
+    const updatedAt = Date.now();
 
     const data = {
       // music metadata
@@ -44,15 +83,15 @@ export async function POST(req: Request) {
 
       playing: Boolean(body.playing),
 
-      // client timestamp
-
-      updatedAt: Date.now(),
+      // 마지막 데이터 변경 시각
+      updatedAt,
     };
 
     await redis.set(KEY, data);
 
     return NextResponse.json({
       success: true,
+      updatedAt,
     });
   } catch (error) {
     console.error("now-playing POST error", error);
@@ -71,31 +110,37 @@ export async function POST(req: Request) {
 
 export async function GET() {
   try {
+    /*
+     * Redis에서 현재 Now Playing snapshot을 가져온다.
+     */
     const data = await redis.get(KEY);
 
-    return NextResponse.json(
-      data ?? {
-        title: null,
-        artist: null,
-        album: null,
+    /*
+     * 반드시 GET 응답을 만드는 순간에 생성한다.
+     *
+     * 이 값은 Redis에 저장하지 않는다.
+     */
+    const serverTime = Date.now();
 
-        albumArtist: null,
-        composer: null,
-        genre: null,
+    /*
+     * 데이터가 없으면 빈 상태를 반환한다.
+     */
+    if (!data) {
+      return NextResponse.json({
+        ...emptyNowPlaying(),
+        serverTime,
+      });
+    }
 
-        persistentId: null,
-        appleId: null,
-
-        artwork: null,
-
-        position: 0,
-        duration: 0,
-
-        playing: false,
-
-        updatedAt: null,
-      },
-    );
+    /*
+     * serverTime은 현재 GET 요청에 대한 서버 시각이다.
+     *
+     * updatedAt은 Redis에 저장된 마지막 snapshot의 시각이다.
+     */
+    return NextResponse.json({
+      ...data,
+      serverTime,
+    });
   } catch (error) {
     console.error("now-playing GET error", error);
 
