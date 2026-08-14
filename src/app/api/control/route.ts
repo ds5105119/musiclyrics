@@ -24,7 +24,7 @@ export async function POST(request: Request) {
       );
     }
 
-    await redis.rpush("music:commands", body.action);
+    await redis.rPush("music:commands", body.action);
 
     return NextResponse.json(
       {
@@ -49,7 +49,7 @@ export async function POST(request: Request) {
 // Mac daemon → API → Redis
 export async function GET() {
   try {
-    const action = await redis.lpop<string>("music:commands");
+    const action = await redis.lPop("music:commands");
 
     if (action === null) {
       return NextResponse.json(
