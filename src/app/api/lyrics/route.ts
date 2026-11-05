@@ -178,7 +178,9 @@ export async function GET(req: Request) {
         resolvedId = search?.results?.find((item) => item.hasTimeSyncedLyrics)?.playParams?.id || null;
       }
       if (resolvedId) {
-        const resolvedKey = `lyrics/apple-${resolvedId}.ttml`;
+        // Capture the non-null ID before deferred callbacks use it.
+        const resolvedAppleId = resolvedId;
+        const resolvedKey = `lyrics/apple-${resolvedAppleId}.ttml`;
         // Migrate old Apple-only bucket objects to the keys this client knows.
         if (!keys.includes(resolvedKey)) {
           const resolvedHit = await timed("r2_resolved", () => readCache([resolvedKey], () => { cacheFailed = true; }));
@@ -189,7 +191,7 @@ export async function GET(req: Request) {
           }
         }
         const apple = await timed("apple_lyrics", () => fetchJSON(
-          `https://lyrics.paxsenix.org/apple-music/lyrics?id=${encodeURIComponent(resolvedId)}&ttml=true&skip_cache=false&v=1`,
+          `https://lyrics.paxsenix.org/apple-music/lyrics?id=${encodeURIComponent(resolvedAppleId)}&ttml=true&skip_cache=false&v=1`,
           5000, headers)) as AppleLyrics | null;
         if (apple?.type === "TTML" && typeof apple.content === "string" && isTTML(apple.content)) {
           storeAliases(keys, apple.content);
