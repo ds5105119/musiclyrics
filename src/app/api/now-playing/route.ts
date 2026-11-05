@@ -313,9 +313,15 @@ export async function GET() {
    *
    * ESP32가 이 endpoint를 호출한다.
    *
-   * serverTime은 반드시 이 요청에서 새로 생성한다.
+   * Keep serverTime at request receipt for older firmware. New firmware
+   * uses serverSentAt plus serverProcessingMs to exclude Redis work from RTT.
    */
+  const requestStarted = performance.now();
   const serverTime = Date.now();
+  const responseClock = () => ({
+    serverSentAt: Date.now(),
+    serverProcessingMs: Math.max(0, performance.now() - requestStarted),
+  });
 
   try {
     /*
@@ -331,7 +337,7 @@ export async function GET() {
      * ------------------------------------------------------
      */
     if (!raw) {
-      return NextResponse.json(emptyNowPlaying(serverTime), {
+      return NextResponse.json({ ...emptyNowPlaying(serverTime), ...responseClock() }, {
         headers: {
           "Cache-Control": "no-store, no-cache, must-revalidate",
         },
@@ -353,6 +359,7 @@ export async function GET() {
           ...emptyNowPlaying(serverTime),
 
           error: "invalid stored state",
+          ...responseClock(),
         },
         {
           status: 500,
@@ -443,6 +450,7 @@ export async function GET() {
          * ESP32에서 RTT와 함께 사용한다.
          */
         serverTime,
+        ...responseClock(),
       },
       {
         headers: {
@@ -462,6 +470,7 @@ export async function GET() {
       {
         error: "redis error",
         serverTime,
+        ...responseClock(),
       },
       {
         status: 500,
